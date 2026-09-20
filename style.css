@@ -72,8 +72,11 @@ header{
 }
 .btn:hover{ border-color:var(--copper); background:#dedede; }
 .btn.ghost{ background:transparent; }
+.btn.active{ background:rgba(201,172,84,0.3); border-color:var(--copper); }
 .btn.danger:hover{ border-color:var(--danger); color:#f3b6ac; }
 .divider-v{ width:1px; height:20px; background:var(--panel-edge); }
+.simulation-speed{ display:flex; align-items:center; gap:4px; font:11px var(--mono); color:var(--muted); }
+.simulation-speed select{ padding:5px 3px; border:1px solid var(--panel-edge); border-radius:5px; background:transparent; color:var(--silk); font:12px var(--mono); cursor:pointer; }
 
 /* ---------- body layout ---------- */
 .body{
@@ -209,9 +212,27 @@ header{
 }
 .save-chip-part:hover{ color:var(--silk); }
 .hint{
-  font-size:11px; line-height:1.5; color:var(--muted);
-  padding:8px 4px 2px; font-family:var(--sans);
+  font-size:11px; color:var(--muted);
+  padding:2px 4px; font-family:var(--sans);
+  margin:0;
 }
+.hint summary{
+  cursor:pointer; user-select:none;
+  padding:6px 2px; font-weight:600; color:var(--hint-text);
+  list-style:none;
+}
+.hint summary::-webkit-details-marker{ display:none; }
+.hint summary::before{
+  content:'▸'; display:inline-block; margin-right:6px;
+  transition:transform 0.15s ease;
+}
+.hint[open] summary::before{ transform:rotate(90deg); }
+.hint summary:hover{ color:var(--silk); }
+.hint ul{
+  list-style:none; margin:0; padding:6px 2px 2px;
+  display:flex; flex-direction:column; gap:5px; line-height:1.4;
+}
+.hint li{ padding-left:10px; text-indent:-10px; }
 .hint b{ color:var(--hint-text); font-weight:600; }
 
 .speaker-config{
@@ -265,7 +286,7 @@ svg.wires{
   position:absolute; inset:0; width:100%; height:100%;
   pointer-events:none;
   overflow: visible;
-  z-index: 12;
+  z-index: 1;
 }
 svg.wires path.wire-hit{ 
   pointer-events:stroke; 
@@ -274,12 +295,14 @@ svg.wires path.wire-hit{
   stroke-width: 18px;
   fill: none;
 }
-svg.wires path.wire-hit:hover + path.wire-vis,
-svg.wires path.wire-hit:hover {
-  stroke: var(--danger);
+svg.wires path.wire-vis{ pointer-events:none; fill:none; z-index:13; }
+svg.wires circle.junction-dot{ pointer-events:none; fill:#141414; stroke:var(--copper-bright); stroke-width:2; }
+svg.wires circle.junction-dot.hot{ fill:var(--signal); filter:drop-shadow(0 0 5px rgba(240,207,90,0.95)); }
+svg.wires path.wire-vis:has(+ path.wire-hit:hover){
+  stroke: var(--danger) !important;
+  stroke-width: 4;
   filter: drop-shadow(0 0 6px rgba(224,114,95,0.7));
 }
-svg.wires path.wire-vis{ pointer-events:none; fill:none; z-index:13; }
 
 /* ---------- selection box ---------- */
 .selection-box{
@@ -363,6 +386,23 @@ svg.wires path.wire-vis{ pointer-events:none; fill:none; z-index:13; }
   box-shadow:0 0 8px 2px rgba(240,207,90,0.65);
 }
 .pin:hover{ border-color:var(--copper-bright); }
+
+/* Wired indicator — a solid core so it's obvious a pin actually has a
+   wire attached even when pins are stacked close together and the
+   wire itself is hidden underneath other parts. */
+.pin.connected::after{
+  content:"";
+  position:absolute;
+  top:50%; left:50%;
+  width:5px; height:5px;
+  border-radius:50%;
+  background:var(--copper-bright);
+  transform:translate(-50%,-50%);
+  pointer-events:none;
+}
+.pin.connected.hot::after{
+  background:#141414;
+}
 
 .toggle{
   margin:0 auto; width:38px; height:20px; border-radius:20px;

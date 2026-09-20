@@ -72,13 +72,13 @@
 /* ============================= circuit simulator ============================= */
 (function(){
     const INPUT_COUNT = { 
-    INPUT: 0, POWER: 0, GROUND: 0, BUTTON: 0, CLOCK: 0, OSCLOCK: 1, OUTPUT: 1, SPEAKER: 1, LCD: 4, SEVEN: 7, FOURTEEN: 18, 
+    INPUT: 0, BUTTON: 0, CLOCK: 0, OSCLOCK: 1, OUTPUT: 1, SPEAKER: 1, LCD: 4, SEVEN: 7, FOURTEEN: 18, 
     NOT: 1, AND: 2, OR: 2, OR3: 3, OR3IN: 3, OR2OUT: 2, NAND: 2, NOR: 2, XOR: 2, XNOR: 2, MEMORY: 2,
     DELAY: 1, CALCULATOR: 2, GREATER: 2, XAND: 2, JOYSTICK: 0, DIPSWITCH: 0, LABEL: 0
   };
 
   const LABELS = { 
-    INPUT: 'SW', POWER: 'PWR', GROUND: 'GND', BUTTON: 'BTN', CLOCK: 'CLK', OSCLOCK: 'OS CLK', OUTPUT: 'LAMP', SPEAKER: 'SPEAKER', LCD: 'LCD', SEVEN: '7-SEG', FOURTEEN: '14 Segment', 
+    INPUT: 'SW', BUTTON: 'BTN', CLOCK: 'CLK', OSCLOCK: 'OS CLK', OUTPUT: 'LAMP', SPEAKER: 'SPEAKER', LCD: 'LCD', SEVEN: '7-SEG', FOURTEEN: '14 Segment', 
     NOT: 'NOT', AND: 'AND', OR: 'OR', OR3: 'OR 3 IN', OR3IN: 'OR 3 IN', OR2OUT: 'OR 2 OUT', NAND: 'NAND', NOR: 'NOR', XOR: 'XOR', XNOR: 'XNOR', MEMORY: 'MEM',
     DELAY: 'DELAY', CALCULATOR: 'CALC', GREATER: 'GREATER', XAND: 'XAND', JOYSTICK: 'Joystick', DIPSWITCH: 'Dip Switch', LABEL: 'Note'
   };
@@ -94,6 +94,7 @@
 
   let nodes = new Map();     
   let wires = [];            
+  let connectedPins = new Set();
   const inputWires = new Map();
   let nodeSeq = 0, wireSeq = 0;
   let pendingWireFrom = null; 
@@ -102,7 +103,14 @@
   let isSelecting = false;
   let selectStart = { x: 0, y: 0 };
   let nodeScale = 1;
+  let routingRevision = 0;
   let hoveredChipNode = null;
+  const BOARD_AUTOSAVE_STORAGE_KEY = 'logic-sandbox-board-autosave-v1';
+  let autosaveTimer = null;
+  let isSimulationPaused = false;
+  let simulationSpeed = 1;
+  let simulationTime = Date.now();
+  let lastSimulationFrame = performance.now();
   const customChips = new Map();
   const customChipsEl = document.getElementById('customChips');
   const CUSTOM_CHIPS_STORAGE_KEY = 'breadboard-custom-chips';
@@ -427,6 +435,7 @@
         node.el.style.transform = `scale(${nodeScale}) rotate(${node.rotation || 0}deg)`;
       }
     });
+    routingRevision++;
     toast(`Node scale: ${Math.round(nodeScale * 100)}%`);
   }
 
@@ -490,6 +499,22 @@
     node.gainNode.gain.setTargetAtTime(targetGain, now, 0.05);
   }
 
+  function stopSpeakerAudio(node) {
+    if (node.fadeStopTimeout) {
+      clearTimeout(node.fadeStopTimeout);
+      node.fadeStopTimeout = null;
+    }
+    if (node.oscillator) {
+      try { node.oscillator.stop(); } catch (e) {}
+      try { node.oscillator.disconnect(); } catch (e) {}
+      node.oscillator = null;
+    }
+    if (node.gainNode) {
+      try { node.gainNode.disconnect(); } catch (e) {}
+      node.gainNode = null;
+    }
+  }
+
   function playTone(node, active) {
     const settings = getSpeakerSettings(node);
     const targetGain = (settings.volume / 100) * 0.28;
@@ -535,8 +560,6 @@
     if(isCustomChip(type)) return '<span class="node-chip-symbol">▣</span>';
     const glyphs = {
       INPUT: '<span class="node-chip-symbol">◎</span>',
-      POWER: '<span class="node-chip-symbol">⎈</span>',
-      GROUND: '<span class="node-chip-symbol">⏚</span>',
       BUTTON: '<span class="node-chip-symbol">●</span>',
       CLOCK: '<span class="node-chip-symbol">◷</span>',
       OSCLOCK: '<span class="node-chip-symbol">◷</span>',
@@ -568,6 +591,7 @@
   }
 
   function createNode(type, x, y){
+    routingRevision++;
     const id = makeId('n');
     const nInputs = INPUT_COUNT[type];
     const el = document.createElement('div');
@@ -605,10 +629,9 @@
         const node = {
       id, type, x, y, value:false,
       el, inPins, outPin, outPins, led: null, lcdDisplay: null,
-      nInputs, period:1500, startTime:Date.now(),
+      nInputs, period:1500, startTime:simulationTime,
       knobX: 0, knobY: 0, operation: '+', calcInputs: [0, 0], history: [], delayTicks: 1, buffer: [false],
       osTargetTime: null, osAlarmTriggered: false, osAlarmStopped: false, rotation: 0,
-      sourceValue: type === 'POWER',
       switches: isDipSwitchType(type) ? new Array(6).fill(false) : undefined,
       labelText: type === 'LABEL' ? ' ' : undefined
     };
@@ -634,6 +657,7 @@
       toggle.addEventListener('click', ()=>{
         node.value = !node.value;
         toggle.classList.toggle('on', node.value);
+        snapshot();
       });
       body.appendChild(toggle);
       const outWrap = document.createElement('div');
@@ -645,31 +669,6 @@
       outPin.dataset.index = '0';
       outWrap.appendChild(outPin);
       body.appendChild(outWrap);
-    } else if(type === 'POWER' || type === 'GROUND'){
-      const sourceLabel = document.createElement('div');
-      sourceLabel.className = 'delay-config';
-      sourceLabel.textContent = node.sourceValue ? 'HIGH' : 'LOW';
-      sourceLabel.style.textAlign = 'center';
-      sourceLabel.style.fontWeight = '700';
-      sourceLabel.style.color = node.sourceValue ? '#ffdc73' : '#7ec7ff';
-      sourceLabel.title = 'Click to toggle between power and ground';
-      sourceLabel.addEventListener('click', () => {
-        node.sourceValue = !node.sourceValue;
-        node.value = !!node.sourceValue;
-        sourceLabel.textContent = node.sourceValue ? 'HIGH' : 'LOW';
-        sourceLabel.style.color = node.sourceValue ? '#ffdc73' : '#7ec7ff';
-      });
-      body.appendChild(sourceLabel);
-      const outWrap = document.createElement('div');
-      outWrap.className = 'pins out';
-      outPin = document.createElement('div');
-      outPin.className = 'pin out';
-      outPin.dataset.nodeId = id;
-      outPin.dataset.kind = 'out';
-      outPin.dataset.index = '0';
-      outWrap.appendChild(outPin);
-      body.appendChild(outWrap);
-      node.value = !!node.sourceValue;
     } else if(type === 'OUTPUT'){
       const inWrap = document.createElement('div');
       inWrap.className = 'pins in';
@@ -1357,7 +1356,7 @@
       if (node) {
         if (node.type === 'CLOCK') {
           node.period = parseInt(e.target.value, 10);
-          node.startTime = Date.now();
+          node.startTime = simulationTime;
         } else {
           node.delayTicks = parseInt(e.target.value, 10);
           node.buffer = new Array(node.delayTicks).fill(false);
@@ -1415,13 +1414,25 @@
 
   function onPinPointerDown(node, kind, index, pinEl, e) {
     e.stopPropagation();
-    pendingWireFrom = { nodeId: node.id, kind, index };
-    pinEl.classList.add('hot');
-    if (pinEl.setPointerCapture) pinEl.setPointerCapture(e.pointerId);
+    if (!pendingWireFrom) {
+      pendingWireFrom = { nodeId: node.id, kind, index, justStarted: true, downX: e.clientX, downY: e.clientY };
+      pinEl.classList.add('hot');
+      if (pinEl.setPointerCapture) pinEl.setPointerCapture(e.pointerId);
+    }
   }
 
   function onPinPointerUp(node, kind, index, pinEl, e) {
     e.stopPropagation();
+    if (pendingWireFrom && pendingWireFrom.justStarted) {
+      const dx = e.clientX - pendingWireFrom.downX;
+      const dy = e.clientY - pendingWireFrom.downY;
+      pendingWireFrom.justStarted = false;
+      if (Math.hypot(dx, dy) < 6) {
+        // Plain click on the starting pin (no drag) — leave the wire pending
+        // so the user can click a second pin later without holding the button.
+        return;
+      }
+    }
     applyWireTarget(e.clientX, e.clientY);
   }
 
@@ -1443,13 +1454,15 @@
   function removeNode(id){
     const node = nodes.get(id);
     if(!node) return;
+    if(node.type === 'SPEAKER') stopSpeakerAudio(node);
     wires = wires.filter(w=>{
-      if(w.from===id || w.to===id){ w.elVis.remove(); w.elHit.remove(); return false; }
+      if(w.from===id || w.to===id){ disposeWire(w); return false; }
       return true;
     });
     rebuildWireIndex();
     node.el.remove();
     nodes.delete(id);
+    routingRevision++;
     selectedNodeIds.delete(id);
     if(hoveredChipNode === node) hoveredChipNode = null;
   }
@@ -1457,15 +1470,22 @@
   function removeWire(wireId){
     const idx = wires.findIndex(w=>w.id===wireId);
     if(idx===-1) return;
-    wires[idx].elVis.remove();
-    wires[idx].elHit.remove();
+    const target = nodes.get(wires[idx].to);
+    if(target && target.type === 'SPEAKER') stopSpeakerAudio(target);
+    disposeWire(wires[idx]);
     wires.splice(idx,1);
     rebuildWireIndex();
   }
 
+  function disposeWire(wire){
+    wire.elVis.remove();
+    wire.elHit.remove();
+    if(wire.elJunction) wire.elJunction.remove();
+  }
+
   function createWire(fromId, toId, toIndex, fromIndex = 0){
     wires = wires.filter(w=>{
-      if(w.to===toId && w.toIndex===toIndex){ w.elVis.remove(); w.elHit.remove(); return false; }
+      if(w.to===toId && w.toIndex===toIndex){ disposeWire(w); return false; }
       return true;
     });
     const id = 'w'+(++wireSeq);
@@ -1474,9 +1494,14 @@
     elHit.addEventListener('click', ()=> { removeWire(id); snapshot(); });
     const elVis = document.createElementNS('http://www.w3.org/2000/svg','path');
     elVis.setAttribute('class','wire-vis');
+    const elJunction = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    elJunction.setAttribute('class','junction-dot');
+    elJunction.setAttribute('r', '5');
+    elJunction.style.display = 'none';
     wireLayer.appendChild(elVis);
     wireLayer.appendChild(elHit);
-    wires.push({ id, from:fromId, to:toId, toIndex, fromIndex, elVis, elHit });
+    wireLayer.appendChild(elJunction);
+    wires.push({ id, from:fromId, to:toId, toIndex, fromIndex, elVis, elHit, elJunction });
     rebuildWireIndex();
   }
 
@@ -1531,7 +1556,7 @@
       const pinCoord = pinCenter(pinEl);
       const a = pendingWireFrom.kind === 'out' ? pinCoord : mousePos;
       const b = pendingWireFrom.kind === 'out' ? mousePos : pinCoord;
-      previewPath.setAttribute('d', bezierPath(a, b));
+      previewPath.setAttribute('d', routeWirePath(a, b, new Set([pendingWireFrom.nodeId])));
       previewPath.style.display = 'block';
     }
   });
@@ -1551,7 +1576,7 @@
         const pinCoord = pinCenter(pinEl);
         const a = pendingWireFrom.kind === 'out' ? pinCoord : mousePos;
         const b = pendingWireFrom.kind === 'out' ? mousePos : pinCoord;
-        previewPath.setAttribute('d', bezierPath(a, b));
+        previewPath.setAttribute('d', routeWirePath(a, b, new Set([pendingWireFrom.nodeId])));
         previewPath.style.display = 'block';
       }
       return;
@@ -1686,6 +1711,7 @@
           n.y = Math.min(maxY, Math.max(0, init.y + dy));
           n.el.style.left = n.x + 'px';
           n.el.style.top = n.y + 'px';
+          routingRevision++;
         }
       });
     });
@@ -1706,6 +1732,11 @@
   window.addEventListener('keydown', (e)=>{
     const inField = document.activeElement && document.activeElement.tagName === 'INPUT';
     if(inField) return;
+
+    if(e.key === 'Escape' && pendingWireFrom){
+      cancelPendingWire();
+      return;
+    }
 
     if(e.key === 'Delete' || e.key === 'Backspace'){
       if(selectedNodeIds.size > 0){
@@ -1769,9 +1800,145 @@
     };
   }
 
-  function bezierPath(a,b){
-    const dx = Math.max(40, Math.abs(b.x-a.x)*0.5);
-    return `M ${a.x} ${a.y} C ${a.x+dx} ${a.y}, ${b.x-dx} ${b.y}, ${b.x} ${b.y}`;
+  function nodeRect(node){
+    return {
+      x: node.x, y: node.y,
+      w: node.el.offsetWidth * nodeScale,
+      h: node.el.offsetHeight * nodeScale
+    };
+  }
+
+  // Liang-Barsky segment/rect intersection test, rect padded outward by `pad`.
+  function segmentIntersectsRect(x1,y1,x2,y2, rect, pad){
+    const rx1 = rect.x - pad, ry1 = rect.y - pad, rx2 = rect.x + rect.w + pad, ry2 = rect.y + rect.h + pad;
+    let t0 = 0, t1 = 1;
+    const dx = x2 - x1, dy = y2 - y1;
+    const p = [-dx, dx, -dy, dy];
+    const q = [x1 - rx1, rx2 - x1, y1 - ry1, ry2 - y1];
+    for(let i=0;i<4;i++){
+      if(p[i] === 0){
+        if(q[i] < 0) return false;
+      } else {
+        const r = q[i] / p[i];
+        if(p[i] < 0){ if(r > t1) return false; if(r > t0) t0 = r; }
+        else { if(r < t0) return false; if(r < t1) t1 = r; }
+      }
+    }
+    return true;
+  }
+
+  function simplifyRoute(points){
+    const result = [];
+    points.forEach(point => {
+      const last = result[result.length - 1];
+      if(!last || last.x !== point.x || last.y !== point.y) result.push(point);
+    });
+    for(let i = result.length - 2; i > 0; i--) {
+      const before = result[i - 1], point = result[i], after = result[i + 1];
+      if((before.x === point.x && point.x === after.x) || (before.y === point.y && point.y === after.y)) result.splice(i, 1);
+    }
+    return result;
+  }
+
+  function orthogonalPath(points){
+    const route = simplifyRoute(points);
+    let d = `M ${route[0].x} ${route[0].y}`;
+    for(let i = 1; i < route.length; i++) {
+      const previous = route[i - 1], point = route[i];
+      if(i === route.length - 1) {
+        d += ` L ${point.x} ${point.y}`;
+        continue;
+      }
+      const next = route[i + 1];
+      const previousLength = Math.abs(point.x - previous.x) + Math.abs(point.y - previous.y);
+      const nextLength = Math.abs(next.x - point.x) + Math.abs(next.y - point.y);
+      const radius = Math.min(10, previousLength / 2, nextLength / 2);
+      const before = {
+        x: point.x + (previous.x - point.x) * radius / previousLength,
+        y: point.y + (previous.y - point.y) * radius / previousLength
+      };
+      const after = {
+        x: point.x + (next.x - point.x) * radius / nextLength,
+        y: point.y + (next.y - point.y) * radius / nextLength
+      };
+      d += ` L ${before.x} ${before.y} Q ${point.x} ${point.y} ${after.x} ${after.y}`;
+    }
+    return d;
+  }
+
+  function routeScore(points, obstacles, pad){
+    let length = 0;
+    let collisions = 0;
+    for(let i = 1; i < points.length; i++) {
+      const previous = points[i - 1], point = points[i];
+      length += Math.abs(point.x - previous.x) + Math.abs(point.y - previous.y);
+      obstacles.forEach(rect => {
+        if(segmentIntersectsRect(previous.x, previous.y, point.x, point.y, rect, pad)) collisions++;
+      });
+    }
+    return collisions * 1000000 + length + (points.length - 2) * 12;
+  }
+
+  // Draw traces as clean, right-angled runs. Candidate routes are scored against
+  // every other component, then the shortest clear route is selected.
+  function routeWirePath(a, b, excludeIds){
+    const pad = 18;
+    const obstacles = [];
+    nodes.forEach((n, id) => {
+      if(excludeIds.has(id)) return;
+      obstacles.push(nodeRect(n));
+    });
+
+    // Outputs are on the right and inputs are on the left, so these short leads
+    // make each connection read naturally even when it loops back to the left.
+    const lead = 30;
+    const start = { x: a.x + lead, y: a.y };
+    const end = { x: b.x - lead, y: b.y };
+    const candidates = [];
+    const addCandidate = points => candidates.push(simplifyRoute(points));
+
+    const centerX = (start.x + end.x) / 2;
+    addCandidate([a, start, { x:centerX, y:a.y }, { x:centerX, y:b.y }, end, b]);
+
+    // Detour lanes come from the edges of components close to this connection.
+    const minX = Math.min(a.x, b.x) - lead * 2;
+    const maxX = Math.max(a.x, b.x) + lead * 2;
+    const lanes = new Set([Math.min(a.y, b.y) - 54, Math.max(a.y, b.y) + 54]);
+    // Guaranteed escape lanes keep a route available when several components
+    // stack up in the same local corridor.
+    if(obstacles.length) {
+      lanes.add(Math.min(a.y, b.y, ...obstacles.map(rect => rect.y - pad)) - 28);
+      lanes.add(Math.max(a.y, b.y, ...obstacles.map(rect => rect.y + rect.h + pad)) + 28);
+    }
+    const middleY = (a.y + b.y) / 2;
+    const nearbyObstacles = obstacles
+      .filter(rect => rect.x <= maxX && rect.x + rect.w >= minX && rect.y <= Math.max(a.y, b.y) + 80 && rect.y + rect.h >= Math.min(a.y, b.y) - 80)
+      .sort((left, right) => Math.abs((left.y + left.h / 2) - middleY) - Math.abs((right.y + right.h / 2) - middleY))
+      .slice(0, 8);
+    nearbyObstacles.forEach(rect => {
+      lanes.add(rect.y - pad - 2);
+      lanes.add(rect.y + rect.h + pad + 2);
+    });
+    lanes.forEach(y => addCandidate([a, start, { x:start.x, y }, { x:end.x, y }, end, b]));
+
+    // A back-edge needs to travel around the circuit rather than fold through it.
+    if(start.x > end.x) {
+      const farRight = Math.max(start.x, ...obstacles.map(rect => rect.x + rect.w + pad)) + 36;
+      const farLeft = Math.min(end.x, ...obstacles.map(rect => rect.x - pad)) - 36;
+      addCandidate([a, start, { x:farRight, y:a.y }, { x:farRight, y:b.y }, end, b]);
+      addCandidate([a, start, { x:farLeft, y:a.y }, { x:farLeft, y:b.y }, end, b]);
+    }
+
+    let best = candidates[0];
+    let bestScore = routeScore(best, obstacles, pad);
+    for(let i = 1; i < candidates.length; i++) {
+      const score = routeScore(candidates[i], obstacles, pad);
+      if(score < bestScore) {
+        best = candidates[i];
+        bestScore = score;
+      }
+    }
+    return orthogonalPath(best);
   }
 
   function evaluateChip(node, inputs){
@@ -1878,13 +2045,9 @@
 
   function simulate(){
     nodes.forEach(node=>{
-      if(node.type === 'POWER' || node.type === 'GROUND') {
-        node.value = !!node.sourceValue;
-        return;
-      }
       if(node.type === 'INPUT' || node.type === 'BUTTON') return;
       if(node.type === 'CLOCK'){
-        node.value = Math.floor((Date.now()-node.startTime)/node.period) % 2 === 0;
+        node.value = Math.floor((simulationTime-node.startTime)/node.period) % 2 === 0;
         return;
       }
 
@@ -2095,6 +2258,13 @@
   }
 
   function renderWires(){
+    const branchCounts = new Map();
+    const renderedJunctions = new Set();
+    const newConnected = new Set();
+    wires.forEach(w => {
+      const key = `${w.from}:${w.fromIndex || 0}`;
+      branchCounts.set(key, (branchCounts.get(key) || 0) + 1);
+    });
     wires.forEach(w => {
       const from = nodes.get(w.from), to = nodes.get(w.to);
       if(!from || !to) return;
@@ -2107,13 +2277,29 @@
       if(!fromPin && from.outPins && from.outPins.length > 0) {
         fromPin = from.outPins[0];
       }
-      if(!fromPin || !to.inPins[w.toIndex]) return;
+      const toPin = to.inPins[w.toIndex];
+      if(!fromPin || !toPin) return;
+      newConnected.add(fromPin);
+      newConnected.add(toPin);
 
       const a = pinCenter(fromPin);
-      const b = pinCenter(to.inPins[w.toIndex]);
-      const d = bezierPath(a, b);
+      const b = pinCenter(toPin);
+      const routeKey = `${routingRevision}:${a.x.toFixed(1)}:${a.y.toFixed(1)}:${b.x.toFixed(1)}:${b.y.toFixed(1)}`;
+      if(w.routeKey !== routeKey) {
+        w.routeKey = routeKey;
+        w.routeD = routeWirePath(a, b, new Set([w.from, w.to]));
+      }
+      const d = w.routeD;
       w.elVis.setAttribute('d', d);
       w.elHit.setAttribute('d', d);
+      const branchKey = `${w.from}:${w.fromIndex || 0}`;
+      const isBranch = branchCounts.get(branchKey) > 1 && !renderedJunctions.has(branchKey);
+      renderedJunctions.add(branchKey);
+      w.elJunction.style.display = isBranch ? '' : 'none';
+      if(isBranch) {
+        w.elJunction.setAttribute('cx', a.x);
+        w.elJunction.setAttribute('cy', a.y);
+      }
       
       let isHot = !!from.value;
       if(from.type === 'JOYSTICK' && from.outValues) {
@@ -2123,22 +2309,34 @@
         isHot = !!from.outValues[fromIndex];
       }
       w.elVis.classList.toggle('hot', isHot);
+      w.elJunction.classList.toggle('hot', isHot);
     });
+
+    connectedPins.forEach(pin => { if(!newConnected.has(pin)) pin.classList.remove('connected'); });
+    newConnected.forEach(pin => pin.classList.add('connected'));
+    connectedPins = newConnected;
   }
 
   function loop(){
-    simulate();
+    const now = performance.now();
+    if(!isSimulationPaused) simulationTime += (now - lastSimulationFrame) * simulationSpeed;
+    lastSimulationFrame = now;
+    if(!isSimulationPaused) simulate();
     renderWires();
     requestAnimationFrame(loop);
   }
   loop();
 
   function clearBoard(){
-    wires.forEach(w=>{ w.elVis.remove(); w.elHit.remove(); });
+    wires.forEach(disposeWire);
     wires = [];
     inputWires.clear();
-    nodes.forEach(n=>n.el.remove());
+    nodes.forEach(n=>{
+      if(n.type === 'SPEAKER') stopSpeakerAudio(n);
+      n.el.remove();
+    });
     nodes.clear();
+    routingRevision++;
     selectedNodeIds.clear();
     pendingWireFrom = null;
     hoveredChipNode = null;
@@ -2318,6 +2516,63 @@
     toast('Board saved');
   }
 
+  function encodeShareData(data){
+    const bytes = new TextEncoder().encode(JSON.stringify(data));
+    let binary = '';
+    const chunkSize = 8192;
+    for(let index = 0; index < bytes.length; index += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+    }
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function decodeShareData(encoded){
+    const padded = encoded.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((encoded.length + 3) % 4);
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+    return JSON.parse(new TextDecoder().decode(bytes));
+  }
+
+  function shareableBoardData(){
+    const board = serializeBoard();
+    const neededChipTypes = new Set(board.nodes.filter(node => isCustomChip(node.type)).map(node => node.type));
+    const includedChips = {};
+    // A saved chip can itself contain another custom chip, so include only the
+    // dependency chain needed to open this particular board.
+    for(const type of neededChipTypes) {
+      const definition = customChips.get(type);
+      if(!definition || includedChips[type]) continue;
+      const cleanDefinition = JSON.parse(JSON.stringify(definition, (key, value) => key === 'evalOrder' ? undefined : value));
+      includedChips[type] = cleanDefinition;
+      (cleanDefinition.nodes || []).forEach(node => {
+        if(isCustomChip(node.type)) neededChipTypes.add(node.type);
+      });
+    }
+    board.customChips = includedChips;
+    return board;
+  }
+
+  function shareBoard(){
+    let link;
+    try {
+      const payload = encodeShareData(shareableBoardData());
+      link = `${location.href.split('#')[0]}#board=${payload}`;
+    } catch(err) {
+      toast('Could not create a share link');
+      return;
+    }
+    if(link.length > 12000) {
+      toast('This board is too large for a reliable share link — use Save instead');
+      return;
+    }
+    const copied = () => toast('Share link copied');
+    if(navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(link).then(copied, () => window.prompt('Copy this share link:', link));
+    } else {
+      window.prompt('Copy this share link:', link);
+    }
+  }
+
   function saveAsChip(){
     const inputNodes = Array.from(nodes.values())
       .filter(node => node.type === 'INPUT' || isDipSwitchType(node.type))
@@ -2369,7 +2624,7 @@
       }
       if(saved.type === 'CLOCK' && saved.period){
         n.period = saved.period;
-        n.startTime = Date.now();
+        n.startTime = simulationTime;
         const selectEl = n.el.querySelector('.clock-select');
         if(selectEl) selectEl.value = saved.period;
       }
@@ -2444,6 +2699,54 @@
     history.push(state);
     if(history.length > HISTORY_LIMIT) history.shift();
     historyIndex = history.length - 1;
+    scheduleAutosave(state);
+  }
+
+  function scheduleAutosave(state = JSON.stringify(serializeBoard())){
+    clearTimeout(autosaveTimer);
+    autosaveTimer = setTimeout(() => {
+      try { localStorage.setItem(BOARD_AUTOSAVE_STORAGE_KEY, state); }
+      catch(err) { /* Private browsing or a full storage quota: the editor still works. */ }
+    }, 250);
+  }
+
+  window.addEventListener('pagehide', () => {
+    try { localStorage.setItem(BOARD_AUTOSAVE_STORAGE_KEY, JSON.stringify(serializeBoard())); }
+    catch(err) { /* Storage is optional; manual Save remains available. */ }
+  });
+
+  function restoreAutosavedBoard(){
+    try {
+      const saved = localStorage.getItem(BOARD_AUTOSAVE_STORAGE_KEY);
+      if(!saved) return false;
+      const data = JSON.parse(saved);
+      if(!Array.isArray(data.nodes) || !Array.isArray(data.wires)) return false;
+      rebuildFromData(data);
+      history = [JSON.stringify(serializeBoard())];
+      historyIndex = 0;
+      toast('Restored autosaved board');
+      return true;
+    } catch(err) {
+      return false;
+    }
+  }
+
+  function restoreSharedBoardFromHash(){
+    try {
+      const encoded = new URLSearchParams(location.hash.slice(1)).get('board');
+      if(!encoded) return false;
+      const data = decodeShareData(encoded);
+      if(!Array.isArray(data.nodes) || !Array.isArray(data.wires)) return false;
+      rebuildFromData(data);
+      history = [JSON.stringify(serializeBoard())];
+      historyIndex = 0;
+      scheduleAutosave(history[0]);
+      toast('Shared board loaded');
+      return true;
+    } catch(err) {
+      toast('This share link is invalid or incomplete');
+      return false;
+    }
   }
 
   function restoreSnapshot(json){
@@ -2512,8 +2815,21 @@
   }
 
   document.getElementById('saveBoard').addEventListener('click', saveBoard);
+  document.getElementById('shareBoard').addEventListener('click', shareBoard);
   document.getElementById('saveChip').addEventListener('click', saveAsChip);
   document.getElementById('saveChipPalette').addEventListener('click', saveAsChip);
+  document.getElementById('simulationPause').addEventListener('click', event => {
+    isSimulationPaused = !isSimulationPaused;
+    lastSimulationFrame = performance.now();
+    event.currentTarget.textContent = isSimulationPaused ? 'Resume' : 'Pause';
+    event.currentTarget.classList.toggle('active', isSimulationPaused);
+    toast(isSimulationPaused ? 'Simulation paused' : 'Simulation running');
+  });
+  document.getElementById('simulationSpeed').addEventListener('change', event => {
+    simulationSpeed = Number(event.target.value) || 1;
+    lastSimulationFrame = performance.now();
+    toast(`Simulation speed: ${event.target.options[event.target.selectedIndex].text}`);
+  });
 
   const loadBoardInput = document.getElementById('loadBoardInput');
   document.getElementById('loadBoardBtn').addEventListener('click', ()=> loadBoardInput.click());
@@ -2747,7 +3063,7 @@
     }
   });
 
-    snapshot();
+    if(!restoreSharedBoardFromHash() && !restoreAutosavedBoard()) snapshot();
 
   /* ---------- palette search ---------- */
   const paletteSearch = document.getElementById('paletteSearch');

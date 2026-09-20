@@ -23,9 +23,21 @@
       <button class="btn ghost" id="loadDLatch">Load: D Latch</button>
       <div class="divider-v"></div>
       <button class="btn ghost" id="saveBoard" title="Save board to a file">Save</button>
+      <button class="btn ghost" id="shareBoard" title="Copy a shareable board link">Share</button>
       <button class="btn ghost" id="saveChip" title="Package the current circuit as a chip">Save Chip</button>
       <button class="btn ghost" id="loadBoardBtn" title="Load board from a file">Load</button>
       <input type="file" id="loadBoardInput" accept="application/json" style="display:none" />
+      <div class="divider-v"></div>
+      <button class="btn ghost" id="simulationPause" title="Pause the circuit simulation">Pause</button>
+      <label class="simulation-speed" title="Simulation speed">
+        <span>Speed</span>
+        <select id="simulationSpeed" aria-label="Simulation speed">
+          <option value="0.25">¼×</option>
+          <option value="0.5">½×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+        </select>
+      </label>
       <div class="divider-v"></div>
       <button class="btn ghost" id="zoomReset" title="Reset zoom and center view"><span id="zoomLabel">100%</span></button>
       <div class="divider-v"></div>
@@ -43,8 +55,6 @@
       </div>
       <h2>INPUTS</h2>
       <button class="part" data-type="INPUT"><span class="glyph">◎</span>Switch</button>
-      <button class="part" data-type="POWER"><span class="glyph">⎈</span>Power</button>
-      <button class="part" data-type="GROUND"><span class="glyph">⏚</span>Ground</button>
       <button class="part" data-type="DIPSWITCH" id="newSwitchAssembly"><span class="glyph">▣</span>Dip Switch</button>
       <button class="part" data-type="BUTTON"><span class="glyph">●</span>Button</button>
       <button class="part" data-type="OSCLOCK"><span class="glyph">◷</span>OS Clock</button>
@@ -104,7 +114,18 @@
       <div class="custom-chips" id="customChips"></div>
       <button class="part save-chip-part" id="saveChipPalette"><span class="glyph">▣</span>Save as Chip</button>
       <div class="palette-sep"></div>
-      <p class="hint"><b>Hold Shift + Drag</b> to select multiple parts. Press <b>Delete</b> to remove selected. <b>Click</b> a pin, then target pin to wire. <b>Click</b> a wire to cut it. <b>Ctrl+C</b> / <b>Ctrl+V</b> to copy/paste. <b>Ctrl+Z</b> / <b>Ctrl+Y</b> to undo/redo. <b>Hover a chip + K</b> to view inside.</p>
+      <details class="hint">
+        <summary>Keyboard &amp; mouse shortcuts</summary>
+        <ul>
+          <li><b>Shift + Drag</b> — select multiple parts</li>
+          <li><b>Delete</b> — remove selected parts</li>
+          <li><b>Click</b> a pin, then click a target pin to wire — no need to hold the button, <b>Esc</b> cancels</li>
+          <li><b>Click</b> a wire — cut it</li>
+          <li><b>Ctrl+C / Ctrl+V</b> — copy / paste</li>
+          <li><b>Ctrl+Z / Ctrl+Y</b> — undo / redo</li>
+          <li><b>Hover a chip + K</b> — view inside</li>
+        </ul>
+      </details>
     </aside>
 
     <div class="canvas-wrap" id="canvasWrap">
